@@ -1,0 +1,333 @@
+#include <stdio.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <random>
+#include <unistd.h>
+#include <typeinfo>
+#include <time.h>
+#include "matplotlibcpp.h"
+#include "Bspline.cpp"
+#include "Bspline.h"
+#include <algorithm>
+
+namespace plt=matplotlibcpp;
+using namespace std;
+
+class node {
+private:
+    double x, y;                // 节点坐标
+    vector<double> pathX, pathY;// 路径 
+    node* parent;               // 父节点-指针
+    double cost;
+public:
+    node(double _x, double _y);
+    double getX();
+    double getY();
+    void setParent(node*);
+    node* getParent();
+    double getCost();//成本等于父节点的成本和父节点到node_new的成本之和
+};
+
+class RRT {
+private:
+    node* startNode, * goalNode;          // 起始节点和目标节点
+    vector<vector<double>> obstacleList;  // 障碍物
+    vector<node*> nodeList;               // 节点
+    double stepSize;                      // 步长
+    double R=5;                           //最大转弯半径
+
+    int goal_sample_rate;
+
+    // 随机函数产生的是一种伪随机数，它实际是一种序列发生器，有固定的算法，只有当种子不同时，序列才不同，
+    // 所以不应该把种子固定在程序中，应该用随机产生的数做种子，如程序运行时的时间等。
+    random_device goal_rd;                // random_device可以生成用来作为种子的随机的无符号整数值。
+    mt19937 goal_gen;                     // mt19937是一种高效的随机数生成算法
+    uniform_int_distribution<int> goal_dis;  //随机数源，随机数源调用随机数算法来生成随机数
+
+    random_device area_rd;
+    mt19937 area_gen;
+    uniform_real_distribution<double> area_dis;
+public:
+    RRT(node*, node*, const vector<vector<double>>&, double , int);//构造函数还可以这样写？
+    node* getNearestNode(const vector<double>&);
+    bool collisionCheck(node* , node* );
+    vector<node*> planning();
+    void ChooseParent(node* ,const vector<node*> , node* );
+    bool kinematicsCheck(node*, node* );
+};
+
+// node构造函数，初始化x,y,parent,cost
+node::node(double _x, double _y) : x(_x), y(_y), parent(nullptr), cost(0) {}
+
+double node::getX() { return x; }
+double node::getY() { return y; }
+
+void node::setParent(node* _parent) { 
+    parent = _parent;
+    this->cost = parent->cost+sqrt(pow(parent->getX()-this->getX(),2)+pow(parent->getY()-this->getY(),2));
+    }
+node* node::getParent() { return parent; }
+
+double node::getCost(){return cost;}
+
+// RRT类构造函数
+RRT::RRT(node* _startNode, node* _goalNode, const vector<vector<double>>& _obstacleList,
+         double _stepSize = 1.0, int _goal_sample_rate = 5)
+    : startNode(_startNode), goalNode(_goalNode),
+      obstacleList(_obstacleList),
+      stepSize(_stepSize), goal_sample_rate(_goal_sample_rate),
+      goal_gen(goal_rd()), goal_dis(uniform_int_distribution<int>(0, 100)),
+      area_gen(area_rd())
+      {}
+
+node* RRT::getNearestNode(const vector<double>& randomPosition)
+{
+    int minID = -1;
+    double minDistance = numeric_limits<double>::max(); // 编译器允许的double类型的最大值
+
+    // 找到和随机位置距离最小的节点,通过遍历所有点
+    for (int i = 0; i < nodeList.size(); i++)
+    {
+        // 在这里距离不需要开根号
+        double distance = pow(nodeList[i]->getX()-randomPosition[0], 2)+pow(nodeList[i]->getY()-randomPosition[1], 2);
+        if (distance < minDistance)
+        {
+            minDistance = distance;    // 更新最小距离，这里的距离应该也可以采用曼哈顿距离或者其他条件判断
+            minID = i;                 // 通过minID去记录下distance最小时对应的节点ID
+        }
+    }
+
+    // 返回找到的距离randomPosition最近的点
+    return nodeList[minID];
+}
+
+//判断一条线段和一个障碍物是否相交
+bool isLineIntersectRectangle(double linePointX1,double linePointY1,double linePointX2,double linePointY2,
+double rectangleLeftTopX,double rectangleLeftTopY,double rectangleRightBottomX,double rectangleRightBottomY)
+    {
+        double lineHeight = linePointY1 - linePointY2;
+        double lineWidth = linePointX2 - linePointX1;  // 计算叉乘 
+        double c = linePointX1 * linePointY2 - linePointX2 * linePointY1;
+        if ((lineHeight * rectangleLeftTopX + lineWidth * rectangleLeftTopY + c >= 0 && lineHeight * rectangleRightBottomX + lineWidth * rectangleRightBottomY + c <= 0)
+            || (lineHeight * rectangleLeftTopX + lineWidth * rectangleLeftTopY + c <= 0 && lineHeight * rectangleRightBottomX + lineWidth * rectangleRightBottomY + c >= 0)
+            || (lineHeight * rectangleLeftTopX + lineWidth * rectangleRightBottomY + c >= 0 && lineHeight * rectangleRightBottomX + lineWidth * rectangleLeftTopY + c <= 0)
+            || (lineHeight * rectangleLeftTopX + lineWidth * rectangleRightBottomY + c <= 0 && lineHeight * rectangleRightBottomX + lineWidth * rectangleLeftTopY + c >= 0))
+        {
+ 
+            if (rectangleLeftTopX > rectangleRightBottomX)
+            {
+                double temp = rectangleLeftTopX;
+                rectangleLeftTopX = rectangleRightBottomX;
+                rectangleRightBottomX = temp;
+            }
+            if (rectangleLeftTopY < rectangleRightBottomY)
+            {
+                double temp1 = rectangleLeftTopY;
+                rectangleLeftTopY = rectangleRightBottomY;
+                rectangleRightBottomY = temp1;
+            }
+            if ((linePointX1 < rectangleLeftTopX && linePointX2 < rectangleLeftTopX)
+                || (linePointX1 > rectangleRightBottomX && linePointX2 > rectangleRightBottomX)
+                || (linePointY1 > rectangleLeftTopY && linePointY2 > rectangleLeftTopY)
+                || (linePointY1 < rectangleRightBottomY && linePointY2 < rectangleRightBottomY))
+            {
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+        else
+        {
+            return false;
+        }
+ 
+    }
+// 检测new节点到父节点的连线是否collision free
+bool RRT::collisionCheck(node* newNode,node* parent) {
+    //边界
+    if(newNode->getX()<=0||newNode->getX()>=20||newNode->getY()<=-1.5||newNode->getY()>=1.5)
+        return false;
+    for (auto item : obstacleList){
+        double x1=item[0],y1=item[1],x2=item[2],y2=item[3];
+        double Ax=parent->getX(),Ay=parent->getY(),Bx=newNode->getX(),By=newNode->getY();
+        if(isLineIntersectRectangle(Ax,Ay,Bx,By,x2,y1,x1,y2)) return false;
+    }
+    return true;
+}
+
+double norm(node* Node1, node* Node2){return sqrt(pow(Node1->getX()-Node2->getX(),2)+pow(Node1->getY()-Node2->getY(),2));}
+bool RRT::kinematicsCheck(node* newNode,node* parent){
+    double l=norm(newNode,parent);
+    if(parent->getParent()==nullptr) return true;
+    double theta0=atan2(R-sqrt(R*R-l*l),l);
+    double theta1=atan2(parent->getX()-newNode->getX(),parent->getY()-newNode->getY())-atan2(parent->getParent()->getX()-parent->getX(),parent->getParent()->getY()-parent->getY());
+    cout<<"t0:"<<theta0<<' '<<"t1:"<<theta1<<endl;
+    return theta1<=theta0;
+}
+
+double cost_cal(node* parent,node* child){
+    return parent->getCost()+sqrt(pow(parent->getX()-child->getX(),2)+pow(parent->getY()-child->getY(),2));
+}
+void RRT::ChooseParent(node* newNode,vector<node*> nodeList,node* nearest){
+    newNode->setParent(nearest);//父节点临时设置为nearest
+    for(auto node:nodeList){
+        if(sqrt(pow(node->getX()-newNode->getX(),2)+pow(node->getY()-newNode->getY(),2))<=(stepSize+1)){//优化范围
+            if(cost_cal(node,newNode) < newNode->getCost())
+                if(collisionCheck(newNode,node)) newNode->setParent(node);
+        }
+    }
+    for(auto node:nodeList){
+        if(sqrt(pow(node->getX()-newNode->getX(),2)+pow(node->getY()-newNode->getY(),2))<=(stepSize+1)){//优化范围
+            if(cost_cal(newNode,node) < node->getCost()){
+                if(collisionCheck(node,newNode)&&kinematicsCheck(node,newNode)) node->setParent(newNode);
+            }
+        }
+    }
+}
+
+vector<node*> RRT::planning() {
+    int count = 0;
+
+    // 画出起始位置和目标位置
+    plt::plot({startNode->getY()},{startNode->getX()},"r*");
+    plt::plot({goalNode->getY()},{goalNode->getX()},"r*");
+    // 画出障碍物
+    for (auto item : obstacleList){
+        double x1=item[0],y1=item[1],x2=item[2],y2=item[3];
+        plt::plot(vector<double>{y1,y1},vector<double>{x1,x2},"b-");
+        plt::plot(vector<double>{y1,y2},vector<double>{x2,x2},"b-");
+        plt::plot(vector<double>{y2,y2},vector<double>{x1,x2},"b-");
+        plt::plot(vector<double>{y1,y2},vector<double>{x1,x1},"b-");
+    }
+
+    // RRT core code
+    nodeList.push_back(startNode); // 每次开始都首先在节点列表中添加起点节点
+    while(1)
+    {
+        // 生成一个随机位置(这个随机位置不是直接作为新节点去使用的，只是树的生长方向)
+        vector<double> randomPosition;//random_node的x，y坐标
+
+        if(goal_dis(goal_gen)>goal_sample_rate)   // 这里可以优化成直接用节点来表示
+        {
+            area_dis=uniform_real_distribution<double>(0, 20);
+            double randX = area_dis(goal_gen);        // 在(0,20)之间随机产生一个值作为x坐标
+            area_dis=uniform_real_distribution<double>(-1.5, 1.5);
+            double randY = area_dis(goal_gen);        // 在(-1.5, 1.5)之间随机产生一个值作为y坐标
+            randomPosition.push_back(randX);
+            randomPosition.push_back(randY);
+        }
+        else{ // 找到了目标,将目标位置保存--有一定的几率把随机点往终点方向引
+            randomPosition.push_back(goalNode->getX());
+            randomPosition.push_back(goalNode->getY());
+        }
+
+        // 找到和新生成随机节点距离最近的节点
+        node* nearestNode = getNearestNode(randomPosition);
+        // 利用反正切计算角度,然后利用角度和步长计算新坐标
+        double theta = atan2(randomPosition[1] - nearestNode->getY(), randomPosition[0] - nearestNode->getX());
+        // 利用之前采样的位置，加上设定的步长，来得到一个new节点
+        node* newNode = new node(nearestNode->getX()+stepSize*cos(theta),nearestNode->getY()+stepSize*sin(theta));
+
+        //new节点的父节点优化-选择一定范围内成本更小的点
+        ChooseParent(newNode,nodeList,nearestNode);
+
+        //运动学约束检测
+        if(!kinematicsCheck(newNode,newNode->getParent())) continue;
+
+        //碰撞检测
+        if (!collisionCheck(newNode,newNode->getParent())) continue;
+        nodeList.push_back(newNode);
+
+        // 画出路径
+        plt::plot(vector<double>{newNode->getY(),nearestNode->getY()},vector<double>{newNode->getX(),nearestNode->getX()},"g-");
+        count++;
+
+        if (sqrt(pow(newNode->getX()-goalNode->getX(),2)+pow(newNode->getY()-goalNode->getY(),2))<=stepSize)
+        {
+            cout << "The path has been found!" << endl;
+            cout<< "finalcost:" <<newNode->getCost()<<endl;
+            break;
+        }
+    }
+
+    // 画出最终得到的路径
+    vector<node*> path;
+    path.push_back(goalNode);
+    node* tmpNode = nodeList.back(); //返回节点列表的最后一个元素
+    while (tmpNode->getParent() != nullptr)
+    {
+        // plt::plot(vector<double>{tmpNode->getY(),tmpNode->getParent()->getY()},vector<double>{tmpNode->getX(),tmpNode->getParent()->getX()},"k");
+        path.push_back(tmpNode);
+        tmpNode = tmpNode->getParent();
+    }
+    
+    path.push_back(startNode);
+    return path;
+}
+
+int main(int argc, char* argv[]) 
+{
+    // 障碍物,矩形，左下和右上坐标//{x1,y1,x2,y2}
+    vector<vector<double>> obstacleList{
+        {3, -1.5, 5, 0.5},
+        {12, -0.5, 14, 1.5}
+    };
+
+    // 起始点和目标点
+    node* startNode = new node(0, -0.5);
+    node* goalNode = new node(20, 1.0);
+
+    clock_t start,finish;
+    double totaltime;
+    start=clock();
+    
+    vector<node*> rough_path;
+    RRT rrt(startNode, goalNode, obstacleList, 0.5, 20);//(~,~,~,step,goal_sample_rate(终点方向几率))
+    rough_path=rrt.planning();
+
+    //B样条平滑
+    int num=rough_path.size();
+    CPosition *testpt=new CPosition[num];
+    
+    vector<double> rough_x(num),rough_y(num);
+    for(int i=0;i<num;i++){
+        rough_x[i]=rough_path[i]->getX();
+        rough_y[i]=rough_path[i]->getY();
+    }
+    reverse(rough_x.begin(),rough_x.end());
+    reverse(rough_y.begin(),rough_y.end());
+
+    plt::named_plot("kinematics_RRT*",rough_y,rough_x,"ro");
+	for(int i=0;i<num;i++){
+        testpt[i]=CPosition(rough_x[i],rough_y[i]);
+    }
+
+	int *Intnum=new int[num-1]; 
+	for(int i=0;i<num-1;i++){
+		Intnum[i]=10;                 //  每一个样条曲线内插入10个点
+	}
+	int num2=num;
+	CBSpline bspline;
+	// bspline.TwoOrderBSplineInterpolatePt(testpt,num2,Intnum);        //  二次B样条曲线
+	bspline.ThreeOrderBSplineInterpolatePt(testpt,num2,Intnum);    //  三次B样条曲线
+
+	// bspline.TwoOrderBSplineSmooth(testpt,num2);      //  二次B样条平滑
+	bspline.ThreeOrderBSplineSmooth(testpt,num2);    //  三次B样条平滑
+
+    int n=num+(num-1)*Intnum[0];
+    vector<double> x_bspline(n),y_bspline(n);
+    for(int i=0;i<n;i++){
+        x_bspline[i]=testpt[i].x;
+        y_bspline[i]=testpt[i].y;
+    }
+    plt::named_plot("3^rd Bspline",y_bspline,x_bspline,"k");
+    finish=clock();
+    totaltime=(double)(finish-start)/CLOCKS_PER_SEC;
+    plt::legend();
+    plt::show();
+    cout<<"time:"<<totaltime<<endl;
+    return 0;
+}
